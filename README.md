@@ -1,15 +1,19 @@
-# ShieldSkip
+# ShieldSkip Native
 
-Native Android application using Android VpnService for local DNS filtering of advertising/tracker domains.
+ShieldSkip usa **SmartSkip por Accesibilidad**, no VPN, para mantener la conexión normal de las aplicaciones.
 
-## Build in GitHub
-1. Upload the contents of this folder to the root of a GitHub repository.
-2. Open Actions.
-3. Select **Build ShieldSkip APK**.
-4. Select **Run workflow**.
-5. When green, open the run and download **ShieldSkip-debug-apk** from Artifacts.
+## Qué hace
+- Interfaz oscura con escudo circular y navegación Escudo / Apps / Stats / Ajustes.
+- Detecta controles accesibles de omitir/cerrar publicidad en aplicaciones compatibles.
+- Intenta pulsar automáticamente textos como `Skip ad`, `Skip ads`, `Saltar anuncio`, `Omitir anuncio`, `Cerrar anuncio`.
+- Permite elegir las aplicaciones protegidas.
+- Lleva estadísticas de acciones realizadas.
+- Pausa de 15 minutos con reanudación automática.
 
-This project intentionally does not require a Gradle wrapper: GitHub Actions installs Gradle 8.13.
+## Limitaciones reales
+Android no permite que una aplicación externa cambie arbitrariamente la velocidad o el contenido del reproductor de otra aplicación. SmartSkip solo puede actuar cuando la aplicación expone un control accesible para omitir/cerrar. No garantiza eliminar todos los anuncios ni puede convertir cualquier anuncio en 10x/20x.
 
-## Scope
-The VPN is a real Android VpnService and the app requests the system VPN permission. DNS filtering can block many ad/tracker domains, but it cannot guarantee removal of every advertisement, including ads served from the same first-party domain as content or traffic that bypasses DNS filtering.
+## Compilación web
+El workflow de `.github/workflows/build-apk.yml` compila el APK con GitHub Actions.
+
+Después de instalar el APK, hay que abrir ShieldSkip, entrar en Ajustes y habilitar **ShieldSkip SmartSkip** en Accesibilidad. Sin esa autorización el servicio no puede leer los controles de otras aplicaciones.

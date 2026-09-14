@@ -1,1 +1,4 @@
-<resources><string name="app_name">ShieldSkip</string><string name="vpn_channel_name">ShieldSkip protección</string><string name="vpn_notification_title">ShieldSkip activo</string><string name="vpn_notification_text">Filtrando dominios de publicidad y rastreo</string></resources>
+<resources>
+    <string name="app_name">ShieldSkip</string>
+    <string name="accessibility_description">ShieldSkip SmartSkip detecta botones de omitir/cerrar publicidad visibles y los pulsa automáticamente.</string>
+</resources>
