@@ -394,12 +394,13 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
                     try { if (hb != null) hb.close(); } catch (Exception ignored) {}
                 }
                 if (copy == null) { ocrBusy = false; return; }
-                com.google.mlkit.vision.common.InputImage image = com.google.mlkit.vision.common.InputImage.fromBitmap(copy, 0);
+                final Bitmap finalCopy = copy;
+                com.google.mlkit.vision.common.InputImage image = com.google.mlkit.vision.common.InputImage.fromBitmap(finalCopy, 0);
                 textRecognizer.process(image)
                         .addOnSuccessListener(text -> {
-                            try { handleOcr(pkg, text); } finally { try { copy.recycle(); } catch (Exception ignored) {} ocrBusy = false; }
+                            try { handleOcr(pkg, text); } finally { try { finalCopy.recycle(); } catch (Exception ignored) {} ocrBusy = false; }
                         })
-                        .addOnFailureListener(e -> { try { copy.recycle(); } catch (Exception ignored) {} ocrBusy = false; });
+                        .addOnFailureListener(e -> { try { finalCopy.recycle(); } catch (Exception ignored) {} ocrBusy = false; });
             }
         });
     }
