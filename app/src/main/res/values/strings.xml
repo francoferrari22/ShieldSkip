@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">ShieldSkip</string>
-    <string name="accessibility_description">ShieldSkip SmartSkip detecta botones de omitir/cerrar publicidad visibles y los pulsa automáticamente.</string>
+    <string name="accessibility_description">ShieldSkip SmartSkip detecta anuncios y busca automáticamente botones de saltar, cerrar, X y controles de reproducción accesibles.</string>
 </resources>

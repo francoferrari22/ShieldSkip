@@ -1,9 +1,9 @@
 package com.shieldskip.nativeapp;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.*;
 import android.content.pm.*;
+import android.graphics.Color;
 import android.os.*;
 import android.provider.Settings;
 import android.view.*;
@@ -20,17 +20,28 @@ public class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
-        getWindow().setStatusBarColor(android.graphics.Color.rgb(15,20,28));
-        getWindow().setNavigationBarColor(android.graphics.Color.rgb(15,20,28));
+        applySystemBars();
         web = new WebView(this);
-        web.setBackgroundColor(android.graphics.Color.rgb(15,20,28));
+        web.setBackgroundColor(Color.rgb(15,20,28));
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
+        web.getSettings().setBuiltInZoomControls(false);
         web.setOverScrollMode(View.OVER_SCROLL_NEVER);
         web.addJavascriptInterface(new Bridge(), "Android");
         web.loadUrl("file:///android_asset/index.html");
         setContentView(web);
         registerReceiver(receiver, new IntentFilter(ACTION_REFRESH), Context.RECEIVER_NOT_EXPORTED);
+    }
+
+    private void applySystemBars() {
+        boolean light = "light".equals(Prefs.theme(this));
+        int bg = light ? Color.rgb(246,248,252) : Color.rgb(15,20,28);
+        getWindow().setStatusBarColor(bg);
+        getWindow().setNavigationBarColor(bg);
+        int flags = getWindow().getDecorView().getSystemUiVisibility();
+        if (light) flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        else flags &= ~(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        getWindow().getDecorView().setSystemUiVisibility(flags);
     }
 
     @Override protected void onDestroy() {
@@ -51,10 +62,7 @@ public class MainActivity extends Activity {
     }
 
     void toggle() {
-        if (!accessibilityEnabled()) {
-            openAccessibilitySettings();
-            return;
-        }
+        if (!accessibilityEnabled()) { openAccessibilitySettings(); return; }
         Prefs.active(this, !Prefs.active(this));
         refresh();
     }
@@ -72,6 +80,12 @@ public class MainActivity extends Activity {
             o.put("blocked", Prefs.blocked(this));
             o.put("bytes", Prefs.bytes(this));
             o.put("apps", Prefs.apps(this).size());
+            o.put("aggressive", Prefs.aggressive(this));
+            o.put("autoClose", Prefs.autoClose(this));
+            o.put("turbo", Prefs.turbo(this));
+            o.put("fastScan", Prefs.fastScan(this));
+            o.put("theme", Prefs.theme(this));
+            o.put("accent", Prefs.accent(this));
             return o.toString();
         } catch (Exception e) { return "{}"; }
     }
@@ -89,10 +103,18 @@ public class MainActivity extends Activity {
         }
         @JavascriptInterface public void openAccessibilitySettings() { MainActivity.this.openAccessibilitySettings(); }
         @JavascriptInterface public String state() { return getStateJson(); }
+        @JavascriptInterface public void setSetting(String key, String value) {
+            if ("aggressive".equals(key)) Prefs.aggressive(MainActivity.this, Boolean.parseBoolean(value));
+            else if ("autoClose".equals(key)) Prefs.autoClose(MainActivity.this, Boolean.parseBoolean(value));
+            else if ("turbo".equals(key)) Prefs.turbo(MainActivity.this, Boolean.parseBoolean(value));
+            else if ("fastScan".equals(key)) Prefs.fastScan(MainActivity.this, Boolean.parseBoolean(value));
+            else if ("theme".equals(key)) { Prefs.theme(MainActivity.this, value); applySystemBars(); }
+            else if ("accent".equals(key)) Prefs.accent(MainActivity.this, value);
+            refresh();
+        }
         @JavascriptInterface public String apps() {
             try {
-                JSONArray a = new JSONArray();
-                PackageManager pm = getPackageManager();
+                JSONArray a = new JSONArray(); PackageManager pm = getPackageManager();
                 List<ApplicationInfo> list = pm.getInstalledApplications(PackageManager.GET_META_DATA);
                 list.sort((x,y)->pm.getApplicationLabel(x).toString().compareToIgnoreCase(pm.getApplicationLabel(y).toString()));
                 Set<String> chosen = Prefs.apps(MainActivity.this);
@@ -100,23 +122,13 @@ public class MainActivity extends Activity {
                     if (ai.packageName.equals(getPackageName())) continue;
                     Intent launch = pm.getLaunchIntentForPackage(ai.packageName);
                     if (launch == null) continue;
-                    JSONObject o = new JSONObject();
-                    o.put("label", pm.getApplicationLabel(ai).toString());
-                    o.put("pkg", ai.packageName);
-                    o.put("selected", chosen.contains(ai.packageName));
-                    a.put(o);
+                    JSONObject o = new JSONObject(); o.put("label", pm.getApplicationLabel(ai).toString()); o.put("pkg", ai.packageName); o.put("selected", chosen.contains(ai.packageName)); a.put(o);
                 }
                 return a.toString();
             } catch (Exception e) { return "[]"; }
         }
         @JavascriptInterface public void setApps(String json) {
-            try {
-                JSONArray a = new JSONArray(json);
-                Set<String> s = new HashSet<>();
-                for (int i=0;i<a.length();i++) s.add(a.getString(i));
-                Prefs.apps(MainActivity.this, s);
-                refresh();
-            } catch (Exception ignored) {}
+            try { JSONArray a = new JSONArray(json); Set<String> s = new HashSet<>(); for (int i=0;i<a.length();i++) s.add(a.getString(i)); Prefs.apps(MainActivity.this,s); refresh(); } catch (Exception ignored) {}
         }
         @JavascriptInterface public void reset() { Prefs.blocked(MainActivity.this,0); Prefs.bytes(MainActivity.this,0); refresh(); }
     }

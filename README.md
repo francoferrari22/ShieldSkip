@@ -1,19 +1,27 @@
-# ShieldSkip Native
+# ShieldSkip SmartSkip v3
 
-ShieldSkip usa **SmartSkip por Accesibilidad**, no VPN, para mantener la conexión normal de las aplicaciones.
+ShieldSkip is a native Android SmartSkip prototype that works **without a VPN**. It uses Android Accessibility to act on controls that another app exposes to accessibility.
 
-## Qué hace
-- Interfaz oscura con escudo circular y navegación Escudo / Apps / Stats / Ajustes.
-- Detecta controles accesibles de omitir/cerrar publicidad en aplicaciones compatibles.
-- Intenta pulsar automáticamente textos como `Skip ad`, `Skip ads`, `Saltar anuncio`, `Omitir anuncio`, `Cerrar anuncio`.
-- Permite elegir las aplicaciones protegidas.
-- Lleva estadísticas de acciones realizadas.
-- Pausa de 15 minutos con reanudación automática.
+## Protection strategy
+1. Explicit Skip/Saltar/Omitir ad controls.
+2. Close/X/Dismiss controls when ad context is detected.
+3. Turbo playback: if an app exposes an accessible playback-speed menu, ShieldSkip tries the highest visible speed up to 20x.
+4. Last-resort seek-forward control when the app exposes it and aggressive mode is enabled.
 
-## Limitaciones reales
-Android no permite que una aplicación externa cambie arbitrariamente la velocidad o el contenido del reproductor de otra aplicación. SmartSkip solo puede actuar cuando la aplicación expone un control accesible para omitir/cerrar. No garantiza eliminar todos los anuncios ni puede convertir cualquier anuncio en 10x/20x.
+This is intentionally conservative about generic X buttons to avoid closing normal app controls. It cannot guarantee removal of ads that expose no accessible control or playback API. Android does not provide a universal API for one app to force another app's private video player to 20x or delete its ad content.
 
-## Compilación web
-El workflow de `.github/workflows/build-apk.yml` compila el APK con GitHub Actions.
+## UI
+- Large animated shield.
+- Light / dark / system theme.
+- Six accent palettes.
+- Aggressive mode.
+- Auto-close/X mode.
+- Turbo playback mode.
+- Fast scan mode.
+- Per-app protection selection.
+- Statistics and pause timer.
 
-Después de instalar el APK, hay que abrir ShieldSkip, entrar en Ajustes y habilitar **ShieldSkip SmartSkip** en Accesibilidad. Sin esa autorización el servicio no puede leer los controles de otras aplicaciones.
+## Build
+Use GitHub Actions workflow `.github/workflows/build-apk.yml` and download the APK artifact after a successful build.
+
+After installation, enable **ShieldSkip SmartSkip** in Android Accessibility settings.

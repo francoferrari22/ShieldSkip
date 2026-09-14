@@ -20,4 +20,17 @@ final class Prefs {
     static void bytes(Context c,long v){ p(c).edit().putLong("bytes",v).apply(); }
     static long started(Context c){ return p(c).getLong("started",System.currentTimeMillis()); }
     static void started(Context c,long v){ p(c).edit().putLong("started",v).apply(); }
+
+    static boolean aggressive(Context c){ return p(c).getBoolean("aggressive", true); }
+    static void aggressive(Context c, boolean v){ p(c).edit().putBoolean("aggressive",v).apply(); }
+    static boolean autoClose(Context c){ return p(c).getBoolean("autoClose", true); }
+    static void autoClose(Context c, boolean v){ p(c).edit().putBoolean("autoClose",v).apply(); }
+    static boolean turbo(Context c){ return p(c).getBoolean("turbo", true); }
+    static void turbo(Context c, boolean v){ p(c).edit().putBoolean("turbo",v).apply(); }
+    static boolean fastScan(Context c){ return p(c).getBoolean("fastScan", true); }
+    static void fastScan(Context c, boolean v){ p(c).edit().putBoolean("fastScan",v).apply(); }
+    static String theme(Context c){ return p(c).getString("theme", "system"); }
+    static void theme(Context c, String v){ p(c).edit().putString("theme",v).apply(); }
+    static String accent(Context c){ return p(c).getString("accent", "emerald"); }
+    static void accent(Context c, String v){ p(c).edit().putString("accent",v).apply(); }
 }
