@@ -1,0 +1,59 @@
+name: Build ShieldSkip APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compilar ShieldSkip
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Descargar proyecto
+        uses: actions/checkout@v4
+
+      - name: Instalar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Verificar archivos del proyecto
+        run: |
+          echo "===== ARCHIVOS ====="
+          ls -la
+          echo "===== APP ====="
+          ls -la app
+          echo "===== JAVA ====="
+          java -version
+          echo "===== GRADLE ====="
+          gradle --version
+
+      - name: Compilar APK ShieldSkip
+        run: |
+          gradle --no-daemon :app:assembleDebug --stacktrace
+
+      - name: Verificar APK generado
+        run: |
+          echo "===== APK GENERADO ====="
+          find app/build/outputs/apk/debug -type f -name "*.apk" -print
+
+      - name: Subir APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShieldSkip-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
