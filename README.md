@@ -25,3 +25,12 @@ This is intentionally conservative about generic X buttons to avoid closing norm
 Use GitHub Actions workflow `.github/workflows/build-apk.yml` and download the APK artifact after a successful build.
 
 After installation, enable **ShieldSkip SmartSkip** in Android Accessibility settings.
+
+
+## SmartSkip v4 — Ad Vision + Play Store Guard
+
+This revision adds screenshot OCR using ML Kit when an ad is visually present but its controls are not exposed to Accessibility. It recognizes visible ad text such as “Anuncios”, “Descargar ahora”, “Más info”, “Saltar” and “Cerrar”, and can tap the detected skip/close control. It also recognizes exposed fast-forward/seek controls.
+
+If an ad CTA launches Google Play immediately after an ad was detected, SmartSkip uses the Accessibility global Back action to return to the protected app instead of leaving the user in the Play Store.
+
+The engine still does not modify another app's private media pipeline; playback speed is only changed when the target app exposes an accessible speed control.

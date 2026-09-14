@@ -4,22 +4,53 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
+import android.os.Build;
 import android.os.Handler;
-import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
+
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+
 import java.util.*;
+import java.util.concurrent.Executor;
 
 /**
- * SmartSkip engine. It uses Accessibility only: no VPN and no traffic interception.
- * Strategy: explicit skip -> close/dismiss -> playback-speed controls -> seek/forward.
+ * SmartSkip v4 engine.
+ *
+ * No VPN and no traffic interception. It combines:
+ *  1) accessibility-node detection;
+ *  2) screenshot OCR for ads that expose no accessibility text;
+ *  3) fast-forward / playback controls when the ad player exposes them;
+ *  4) a short Play Store return guard after an ad CTA is detected, so an
+ *     accidental "Descargar ahora" / "Más info" cannot strand the user in Play Store.
+ *
+ * Important: Android does not provide a universal API to change another
+ * application's private video playback rate. We only activate controls that
+ * the target application exposes to Accessibility or that OCR can locate.
  */
 public class SmartSkipAccessibilityService extends AccessibilityService {
+    private static final String PLAY_STORE = "com.android.vending";
+
+    private final Handler handler = new Handler();
+    private final Executor mainExecutor = command -> handler.post(command);
+    private TextRecognizer textRecognizer;
+
     private long lastActionAt = 0L;
     private String lastKey = "";
-    private long turboMenuAt = 0L;
-    private final Handler handler = new Handler();
+    private long lastScreenshotAt = 0L;
+    private long lastAdDetectedAt = 0L;
+    private long storeGuardUntil = 0L;
+    private String lastAdPackage = "";
+    private boolean ocrBusy = false;
+    private int storeBacks = 0;
+
     private final Runnable scanner = new Runnable() {
         @Override public void run() {
             if (Prefs.active(SmartSkipAccessibilityService.this)) scanCurrentWindow();
@@ -32,20 +63,30 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
         "saltar anuncio", "saltar anuncios", "omitir anuncio", "omitir anuncios",
         "saltar publicidad", "omitir publicidad", "saltar anuncio ahora", "skip this advertisement"
     };
+
     private static final String[] CLOSE = {
         "close ad", "close advertisement", "close advert", "cerrar anuncio", "cerrar publicidad",
-        "dismiss ad", "dismiss advertisement", "dismiss advert", "dismiss advertisement"
+        "dismiss ad", "dismiss advertisement", "dismiss advert"
     };
+
     private static final String[] AD_MARKERS = {
         "advertisement", "advertising", "sponsored", "patrocinado", "publicidad", "anuncio", "anuncios",
-        "ad ·", "ads", "advert", "publicidad pagada", "contenido patrocinado"
+        "ad ·", "ads", "advert", "publicidad pagada", "contenido patrocinado", "descargar ahora", "más info",
+        "mas info", "learn more", "install now", "download now"
     };
+
     private static final String[] SPEED_MENU = {
-        "playback speed", "velocidad de reproducción", "velocidad de reproduccion", "reproduction speed"
+        "playback speed", "velocidad de reproducción", "velocidad de reproduccion", "reproduction speed", "speed"
     };
+
     private static final String[] FORWARD = {
         "seek forward", "forward 10 seconds", "forward 15 seconds", "forward 30 seconds",
         "adelantar 10 segundos", "adelantar 15 segundos", "adelantar 30 segundos", "avanzar 10 segundos"
+    };
+
+    private static final String[] FAST_IDS = {
+        "fast_forward", "fastforward", "forward", "seek_forward", "skip_forward", "advance",
+        "ffwd", "ad_skip", "skip_button", "next_ad", "continue_ad"
     };
 
     @Override public void onServiceConnected() {
@@ -62,6 +103,11 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
             info.notificationTimeout = 50;
             setServiceInfo(info);
         }
+
+        if (Build.VERSION.SDK_INT >= 30) {
+            textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        }
+
         Prefs.active(this, true);
         handler.removeCallbacks(scanner);
         handler.post(scanner);
@@ -71,45 +117,103 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
         if (!Prefs.active(this) || event == null) return;
         String pkg = event.getPackageName() == null ? "" : event.getPackageName().toString();
+
+        // If an ad CTA managed to launch Google Play, immediately return to the
+        // protected app. The guard is only armed after an ad was detected.
+        if (PLAY_STORE.equals(pkg)) {
+            if (System.currentTimeMillis() < storeGuardUntil && !lastAdPackage.isEmpty()) {
+                returnFromPlayStore();
+            }
+            return;
+        }
+
         if (pkg.equals(getPackageName()) || !isProtectedPackage(pkg)) return;
         scanCurrentWindow();
     }
 
     private void scanCurrentWindow() {
+        String pkg = getCurrentPackage();
+        if (PLAY_STORE.equals(pkg)) {
+            if (System.currentTimeMillis() < storeGuardUntil && !lastAdPackage.isEmpty()) returnFromPlayStore();
+            return;
+        }
+        if (!isProtectedPackage(pkg) || pkg.equals(getPackageName())) return;
+
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return;
+        if (root == null) {
+            maybeScreenshotScan(pkg, false);
+            return;
+        }
+
         try {
             List<AccessibilityNodeInfo> nodes = collect(root);
             boolean adContext = hasAdContext(nodes);
+            if (adContext) markAd(pkg);
+
             AccessibilityNodeInfo target = null;
 
-            // 1) Highest confidence: explicit skip.
+            // 1) Explicit skip has absolute priority.
             target = bestTextAction(nodes, SKIP);
+
+            // 2) Explicit ad close / dismiss.
             if (target == null && Prefs.autoClose(this)) target = bestTextAction(nodes, CLOSE);
 
-            // 2) X / close icon with an advertisement context.
-            if (target == null && adContext && Prefs.autoClose(this)) target = bestCloseIcon(nodes, root);
+            // 3) Controls whose id/class/content-description indicate fast-forward/skip.
+            if (target == null && adContext && Prefs.aggressive(this)) target = bestFastForward(nodes);
 
-            // 3) If no skip/close exists, try an exposed playback-speed menu.
+            // 4) Close X / dismiss icon, but only in ad context.
+            if (target == null && adContext && Prefs.autoClose(this)) target = bestCloseIcon(nodes);
+
+            // 5) Exposed playback speed menu and highest available speed.
             if (target == null && adContext && Prefs.turbo(this)) {
                 AccessibilityNodeInfo speedChoice = bestSpeedChoice(nodes);
                 if (speedChoice != null) target = speedChoice;
-                else if (System.currentTimeMillis() - turboMenuAt > 1800L) {
+                else if (System.currentTimeMillis() - lastActionAt > 1200L) {
                     AccessibilityNodeInfo menu = bestTextAction(nodes, SPEED_MENU);
-                    if (menu != null) { turboMenuAt = System.currentTimeMillis(); target = menu; }
+                    if (menu != null) target = menu;
                 }
             }
 
-            // 4) Last-resort player control: a visible seek-forward button, only in ad context.
+            // 6) Last-resort seek-forward control.
             if (target == null && adContext && Prefs.turbo(this) && Prefs.aggressive(this)) {
                 target = bestTextAction(nodes, FORWARD);
             }
 
             if (target != null) performSmartClick(target);
+
+            // 7) OCR is the fallback for custom/canvas ads whose text is visible
+            // to the user but absent from the accessibility tree.
+            maybeScreenshotScan(pkg, adContext);
             recycleExcept(nodes, target);
         } finally {
             try { root.recycle(); } catch (Exception ignored) {}
         }
+    }
+
+    private String getCurrentPackage() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null || root.getPackageName() == null) return "";
+        String p = root.getPackageName().toString();
+        try { root.recycle(); } catch (Exception ignored) {}
+        return p;
+    }
+
+    private void markAd(String pkg) {
+        lastAdDetectedAt = System.currentTimeMillis();
+        lastAdPackage = pkg;
+        storeGuardUntil = lastAdDetectedAt + 15000L;
+        storeBacks = 0;
+    }
+
+    private void returnFromPlayStore() {
+        if (storeBacks > 3) return;
+        storeBacks++;
+        performGlobalAction(GLOBAL_ACTION_BACK);
+        handler.postDelayed(() -> {
+            if (PLAY_STORE.equals(getCurrentPackage()) && System.currentTimeMillis() < storeGuardUntil) {
+                performGlobalAction(GLOBAL_ACTION_BACK);
+            }
+        }, 180L);
     }
 
     private boolean isProtectedPackage(String pkg) {
@@ -136,7 +240,9 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
         for (AccessibilityNodeInfo n : nodes) {
             if (matches(nodeText(n), AD_MARKERS)) return true;
             String id = safe(n.getViewIdResourceName()).toLowerCase(Locale.ROOT);
-            if (id.contains("ad_") || id.startsWith("ad") || id.contains("advert") || id.contains("sponsor")) return true;
+            String cls = safe(n.getClassName()).toLowerCase(Locale.ROOT);
+            if (id.contains("ad_") || id.startsWith("ad") || id.contains("advert") || id.contains("sponsor") ||
+                    cls.contains("adview") || cls.contains("nativead") || cls.contains("rewardedad")) return true;
         }
         return false;
     }
@@ -147,6 +253,8 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
         for (AccessibilityNodeInfo n : nodes) {
             String text = nodeText(n);
             if (!matches(text, phrases) || !isSafeActionTarget(n)) continue;
+            // Never choose ad CTAs that intentionally open an external store.
+            if (isStoreCta(text)) continue;
             int score = text.length() < 80 ? 10 : 2;
             if (n.isClickable()) score += 4;
             if (n.isVisibleToUser()) score += 5;
@@ -155,7 +263,30 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
         return best;
     }
 
-    private AccessibilityNodeInfo bestCloseIcon(List<AccessibilityNodeInfo> nodes, AccessibilityNodeInfo root) {
+    private boolean isStoreCta(String text) {
+        return text.contains("descargar ahora") || text.contains("download now") || text.contains("install now") ||
+                text.equals("más info") || text.equals("mas info") || text.contains("learn more");
+    }
+
+    private AccessibilityNodeInfo bestFastForward(List<AccessibilityNodeInfo> nodes) {
+        AccessibilityNodeInfo best = null;
+        int scoreBest = -1;
+        for (AccessibilityNodeInfo n : nodes) {
+            if (!isSafeActionTarget(n)) continue;
+            String id = safe(n.getViewIdResourceName()).toLowerCase(Locale.ROOT);
+            String cls = safe(n.getClassName()).toLowerCase(Locale.ROOT);
+            String text = nodeText(n);
+            boolean match = matches(text, FORWARD);
+            for (String k : FAST_IDS) if (id.contains(k) || cls.contains(k) || text.contains(k.replace('_',' '))) match = true;
+            if (!match) continue;
+            Rect r = new Rect(); n.getBoundsInScreen(r);
+            int score = 8 + (n.isClickable() ? 4 : 0) + (r.top < getResources().getDisplayMetrics().heightPixels * .30f ? 3 : 0);
+            if (score > scoreBest) { best = n; scoreBest = score; }
+        }
+        return best;
+    }
+
+    private AccessibilityNodeInfo bestCloseIcon(List<AccessibilityNodeInfo> nodes) {
         AccessibilityNodeInfo best = null;
         int bestScore = -1;
         for (AccessibilityNodeInfo n : nodes) {
@@ -165,7 +296,7 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
             boolean closeLike = text.equals("x") || text.equals("×") || text.contains("close") || text.contains("cerrar") ||
                     text.contains("dismiss") || id.contains("close") || id.contains("dismiss") || id.contains("cancel") ||
                     id.contains("ad_close") || id.endsWith("_x") || cls.contains("close");
-            if (!closeLike || !isSafeActionTarget(n) || !n.isVisibleToUser()) continue;
+            if (!closeLike || isStoreCta(text) || !isSafeActionTarget(n) || !n.isVisibleToUser()) continue;
             Rect r = new Rect(); n.getBoundsInScreen(r);
             int w = getResources().getDisplayMetrics().widthPixels;
             int h = getResources().getDisplayMetrics().heightPixels;
@@ -190,8 +321,10 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
     }
 
     private int speedValue(String s) {
-        String[] values = {"20x","16x","12x","10x","8x","6x","4x","3x","2x"};
-        for (String v : values) if (s.contains(v)) return Integer.parseInt(v.substring(0,v.length()-1));
+        String[] values = {"20x","16x","12x","10x","8x","6x","4x","3x","2x","1.5x"};
+        for (String v : values) if (s.contains(v)) {
+            try { return (int)Float.parseFloat(v.substring(0,v.length()-1)); } catch (Exception ignored) {}
+        }
         return 0;
     }
 
@@ -201,8 +334,7 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
     }
 
     private boolean isSafeActionTarget(AccessibilityNodeInfo n) {
-        if (n == null) return false;
-        if (!n.isVisibleToUser()) return false;
+        if (n == null || !n.isVisibleToUser()) return false;
         if (n.isClickable() || n.isFocusable()) return true;
         for (AccessibilityNodeInfo.AccessibilityAction a : n.getActionList())
             if (a.getId() == AccessibilityNodeInfo.ACTION_CLICK) return true;
@@ -212,7 +344,7 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
     private void performSmartClick(AccessibilityNodeInfo n) {
         long now = System.currentTimeMillis();
         String key = buildKey(n);
-        if (now - lastActionAt < 650L && key.equals(lastKey)) return;
+        if (now - lastActionAt < 450L && key.equals(lastKey)) return;
         boolean ok = clickNode(n);
         if (ok) {
             lastActionAt = now; lastKey = key;
@@ -233,11 +365,96 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
         Rect r = new Rect(); n.getBoundsInScreen(r);
         if (r.width() > 0 && r.height() > 0) {
             Path path = new Path(); path.moveTo(r.centerX(), r.centerY());
-            GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(path, 0, 70);
+            GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(path, 0, 55);
             GestureDescription gesture = new GestureDescription.Builder().addStroke(stroke).build();
             return dispatchGesture(gesture, null, null);
         }
         return false;
+    }
+
+    private void maybeScreenshotScan(String pkg, boolean adContext) {
+        if (Build.VERSION.SDK_INT < 30 || textRecognizer == null || ocrBusy) return;
+        long now = System.currentTimeMillis();
+        if (now - lastScreenshotAt < 1100L) return;
+        if (!adContext && now - lastAdDetectedAt > 5000L) return;
+        lastScreenshotAt = now;
+        ocrBusy = true;
+        takeScreenshot(0, mainExecutor, new TakeScreenshotCallback() {
+            @Override public void onFailure(int errorCode) { ocrBusy = false; }
+            @Override public void onSuccess(ScreenshotResult result) {
+                Bitmap copy = null;
+                HardwareBuffer hb = null;
+                try {
+                    hb = result.getHardwareBuffer();
+                    Bitmap raw = Bitmap.wrapHardwareBuffer(hb, result.getColorSpace());
+                    if (raw != null) copy = raw.copy(Bitmap.Config.ARGB_8888, false);
+                    if (raw != null) raw.recycle();
+                } catch (Throwable ignored) {
+                } finally {
+                    try { if (hb != null) hb.close(); } catch (Exception ignored) {}
+                }
+                if (copy == null) { ocrBusy = false; return; }
+                com.google.mlkit.vision.common.InputImage image = com.google.mlkit.vision.common.InputImage.fromBitmap(copy, 0);
+                textRecognizer.process(image)
+                        .addOnSuccessListener(text -> {
+                            try { handleOcr(pkg, text); } finally { try { copy.recycle(); } catch (Exception ignored) {} ocrBusy = false; }
+                        })
+                        .addOnFailureListener(e -> { try { copy.recycle(); } catch (Exception ignored) {} ocrBusy = false; });
+            }
+        });
+    }
+
+    private void handleOcr(String pkg, Text text) {
+        String all = text.getText() == null ? "" : text.getText().toLowerCase(Locale.ROOT);
+        boolean ad = containsAny(all, AD_MARKERS) || all.contains("anuncios") || all.contains("anuncio");
+        if (ad) markAd(pkg);
+
+        // OCR can see text drawn by a video/canvas even when Accessibility cannot.
+        for (Text.TextBlock block : text.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                String s = line.getText() == null ? "" : line.getText().trim().toLowerCase(Locale.ROOT);
+                Rect box = line.getBoundingBox();
+                if (box == null) continue;
+
+                if (containsAny(s, SKIP) || s.equals("skip") || s.equals("omitir") || s.equals("saltar")) {
+                    tapRect(box); return;
+                }
+
+                if (ad && (s.equals("x") || s.equals("×") || s.contains("cerrar") || s.contains("close") || s.contains("dismiss"))) {
+                    int w = getResources().getDisplayMetrics().widthPixels;
+                    if (box.centerX() > w * .55f || box.top < getResources().getDisplayMetrics().heightPixels * .35f) {
+                        tapRect(box); return;
+                    }
+                }
+
+                // Some rewarded/interstitial players expose a visible >> control only
+                // in the rendered frame. OCR may recognize it as >> or > >.
+                if (ad && (s.contains(">>") || s.equals("> >") || s.equals(">> "))) {
+                    tapRect(box); return;
+                }
+            }
+        }
+    }
+
+    private boolean containsAny(String s, String[] phrases) {
+        for (String p : phrases) if (s.contains(p)) return true;
+        return false;
+    }
+
+    private void tapRect(Rect r) {
+        if (r == null || r.width() <= 0 || r.height() <= 0) return;
+        long now = System.currentTimeMillis();
+        String key = "ocr|" + r.toShortString();
+        if (now - lastActionAt < 450L && key.equals(lastKey)) return;
+        Path path = new Path(); path.moveTo(r.centerX(), r.centerY());
+        GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(path, 0, 55);
+        GestureDescription gesture = new GestureDescription.Builder().addStroke(stroke).build();
+        if (dispatchGesture(gesture, null, null)) {
+            lastActionAt = now; lastKey = key;
+            Prefs.blocked(this, Prefs.blocked(this) + 1);
+            Prefs.bytes(this, Prefs.bytes(this) + 2048);
+            sendState();
+        }
     }
 
     private String nodeText(AccessibilityNodeInfo n) {
@@ -265,5 +482,15 @@ public class SmartSkipAccessibilityService extends AccessibilityService {
     }
 
     @Override public void onInterrupt() { }
-    @Override public void onDestroy() { handler.removeCallbacks(scanner); Prefs.active(this, false); sendState(); super.onDestroy(); }
+
+    @Override public void onDestroy() {
+        handler.removeCallbacks(scanner);
+        if (textRecognizer != null) {
+            try { textRecognizer.close(); } catch (Exception ignored) {}
+            textRecognizer = null;
+        }
+        Prefs.active(this, false);
+        sendState();
+        super.onDestroy();
+    }
 }
